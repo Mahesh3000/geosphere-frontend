@@ -1,18 +1,20 @@
 import React, { useState, useEffect } from 'react';
-import { GoogleMap, Marker, useLoadScript } from '@react-google-maps/api';
+import { GoogleMap, Marker, DirectionsRenderer, useLoadScript } from '@react-google-maps/api';
 
-interface Location {
+export interface MapLocation {
     id: string;
     name: string;
     lat: number;
     lng: number;
+    vicinity?: string; // short address from Places API
+
 }
 
 declare const google: any; // add this to avoid TS errors for global `google`
 
 interface MapWrapperProps {
     filter: 'caremap' | 'openspace' | 'weekendradar' | 'trackez';
-    setHospitals: (data: Location[]) => void;
+    setHospitals: (data: MapLocation[]) => void;
 
 }
 
@@ -23,7 +25,7 @@ const containerStyle = {
 
 const defaultCenter = { lat: 37.7749, lng: -122.4194 }; // fallback (San Francisco)
 
-const sampleData: Record<string, Location[]> = {
+const sampleData: Record<string, MapLocation[]> = {
     caremap: [
         { id: '1', name: 'Hospital A', lat: 37.773, lng: -122.431 },
         { id: '2', name: 'Clinic B', lat: 37.779, lng: -122.412 },
@@ -42,15 +44,15 @@ const sampleData: Record<string, Location[]> = {
     ],
 };
 
-const MapWrapper: React.FC<MapWrapperProps> = ({ filter }) => {
+const MapWrapper: React.FC<MapWrapperProps> = ({ filter, setHospitals }) => {
     const { isLoaded, loadError } = useLoadScript({
         googleMapsApiKey: import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '',
         libraries: ['places'], // THIS IS REQUIRED
-
     });
 
     const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
-    const [markers, setMarkers] = useState<Location[]>([]);
+    const [markers, setMarkers] = useState<MapLocation[]>([]);
+    const [directions, setDirections] = useState<google.maps.DirectionsResult | null>(null);
 
     // const service = new google.maps.places.PlacesService(map);
 
@@ -71,52 +73,85 @@ const MapWrapper: React.FC<MapWrapperProps> = ({ filter }) => {
         }
     }, []);
 
-    console.log('userLocation', userLocation);
 
-    // Update markers based on filter
     useEffect(() => {
-        setMarkers(sampleData[filter] || []);
+        const filtered = sampleData[filter] || [];
+        setMarkers(filtered);
+        setHospitals(filtered);
     }, [filter]);
-
 
 
     useEffect(() => {
         if (!userLocation) return;
 
-        if (filter === 'caremap') {
-            const map = new google.maps.Map(document.createElement('div'));
-            const service = new google.maps.places.PlacesService(map);
+        const map = new google.maps.Map(document.createElement('div'));
+        const service = new google.maps.places.PlacesService(map);
+        const location = new google.maps.LatLng(userLocation.lat, userLocation.lng);
 
-            const location = new google.maps.LatLng(userLocation.lat, userLocation.lng);
+        let request: google.maps.places.PlaceSearchRequest = {
+            location,
+            radius: 5000,
+        };
 
-            service.nearbySearch(
-                {
-                    location,
-                    radius: 5000,
-                    type: 'hospital',
-                },
-                (results: google.maps.places.PlaceResult[], status: string) => {
-                    if (status === google.maps.places.PlacesServiceStatus.OK) {
-                        const newMarkers: Location[] = results.map((place, idx) => ({
-                            id: place.place_id || idx.toString(),
-                            name: place.name || 'Unknown Hospital',
-                            lat: place.geometry?.location?.lat() || 0,
-                            lng: place.geometry?.location?.lng() || 0,
-                        }));
-                        setHospitals(newMarkers); // store in MainLayout
-
-                        setMarkers(newMarkers);
-                    } else {
-                        setMarkers([]);
-                    }
-                }
-            );
-        } else {
-            setMarkers(sampleData[filter] || []);
+        switch (filter) {
+            case 'caremap':
+                request.type = 'hospital';
+                break;
+            case 'openspace':
+                request.type = 'park'; // parks, natural open spaces
+                break;
+            case 'weekendradar':
+                request.type = 'museum'; // museums, galleries, theaters can be added separately if needed
+                break;
+            case 'trackez':
+                request.type = 'bicycle path'; // museums, galleries, theaters can be added separately if needed            
+                break
+            default:
+                return;
         }
-    }, [filter, userLocation]);
 
-    console.log("hospital", markers);
+        service.nearbySearch(request, (results, status) => {
+            if (status === google.maps.places.PlacesServiceStatus.OK) {
+                const newMarkers: Location[] = results.map((place, idx) => ({
+                    id: place.place_id || idx.toString(),
+                    name: place.name || 'Unnamed',
+                    lat: place.geometry?.location?.lat() || 0,
+                    lng: place.geometry?.location?.lng() || 0,
+                    vicinity: place.vicinity || '', // short address if available
+                }));
+
+                setMarkers(newMarkers);
+                setHospitals(newMarkers);
+
+                if (newMarkers.length > 0 && userLocation) {
+                    const directionsService = new google.maps.DirectionsService();
+
+                    directionsService.route(
+                        {
+                            origin: userLocation,
+                            destination: {
+                                lat: newMarkers[0].lat,
+                                lng: newMarkers[0].lng,
+                            },
+                            travelMode: google.maps.TravelMode.DRIVING,
+                        },
+                        (result, status) => {
+                            if (status === google.maps.DirectionsStatus.OK) {
+                                setDirections(result);
+                            } else {
+                                console.error('Directions request failed:', status);
+                            }
+                        }
+                    );
+                }
+            } else {
+                setMarkers([]);
+                setHospitals([]);
+                setDirections(null);
+
+            }
+        });
+    }, [filter, userLocation]);
 
 
     if (loadError) return <div>Error loading maps</div>;
@@ -141,8 +176,11 @@ const MapWrapper: React.FC<MapWrapperProps> = ({ filter }) => {
 
             {/* Markers for current filter */}
             {markers.map(({ id, name, lat, lng }) => (
-                <Marker key={id} position={{ lat, lng }} title={name} hospitals={markers} />
+                <Marker key={id} position={{ lat, lng }} title={name} />
             ))}
+
+            {directions && <DirectionsRenderer directions={directions} />}
+
         </GoogleMap>
     );
 };
